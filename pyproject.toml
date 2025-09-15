@@ -14,10 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 tools = [
-    "typer[all]",
+    "typer>=0.12.3",
     "litellm>=1.35.0",
     "python-dotenv>=1.0.1",
-    "terminalbench-cli>=0.2.0",
 ]
 
 [project.scripts]
