@@ -28,6 +28,7 @@ import sys
 import zipfile
 import tempfile
 import shutil
+import shlex
 import json
 from pathlib import Path
 from typing import Optional, Tuple
@@ -52,12 +53,28 @@ import truststore
 ssl_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 client = httpx.Client(verify=ssl_context)
 
+def _github_token(cli_token: str | None = None) -> str | None:
+    """Return sanitized GitHub token (cli arg takes precedence) or None."""
+    return ((cli_token or os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or "").strip()) or None
+
+def _github_auth_headers(cli_token: str | None = None) -> dict:
+    """Return Authorization header dict only when a non-empty token exists."""
+    token = _github_token(cli_token)
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
 # Constants
 AI_CHOICES = {
     "copilot": "GitHub Copilot",
     "claude": "Claude Code",
     "gemini": "Gemini CLI",
-    "cursor": "Cursor"
+    "cursor": "Cursor",
+    "qwen": "Qwen Code",
+    "opencode": "opencode",
+    "codex": "Codex CLI",
+    "windsurf": "Windsurf",
+    "kilocode": "Kilo Code",
+    "auggie": "Auggie CLI",
+    "roo": "Roo Code",
 }
 # Add script type choices
 SCRIPT_TYPE_CHOICES = {"sh": "POSIX Shell (bash/zsh)", "ps": "PowerShell"}
@@ -75,7 +92,7 @@ BANNER = """
 ╚══════╝╚═╝     ╚══════╝ ╚═════╝╚═╝╚═╝        ╚═╝   
 """
 
-TAGLINE = "Spec-Driven Development Toolkit"
+TAGLINE = "GitHub Spec Kit - Spec-Driven Development Toolkit"
 class StepTracker:
     """Track and render hierarchical steps without emojis, similar to Claude Code tree output.
     Supports live auto-refresh via an attached refresh callback.
@@ -126,7 +143,7 @@ class StepTracker:
                 pass
 
     def render(self):
-        tree = Tree(f"[bold cyan]{self.title}[/bold cyan]", guide_style="grey50")
+        tree = Tree(f"[cyan]{self.title}[/cyan]", guide_style="grey50")
         for step in self.steps:
             label = step["label"]
             detail_text = step["detail"].strip() if step["detail"] else ""
@@ -219,14 +236,14 @@ def select_with_arrows(options: dict, prompt_text: str = "Select an option", def
     def create_selection_panel():
         """Create the selection panel with current selection highlighted."""
         table = Table.grid(padding=(0, 2))
-        table.add_column(style="bright_cyan", justify="left", width=3)
+        table.add_column(style="cyan", justify="left", width=3)
         table.add_column(style="white", justify="left")
         
         for i, key in enumerate(option_keys):
             if i == selected_index:
-                table.add_row("▶", f"[bright_cyan]{key}: {options[key]}[/bright_cyan]")
+                table.add_row("▶", f"[cyan]{key}[/cyan] [dim]({options[key]})[/dim]")
             else:
-                table.add_row(" ", f"[white]{key}: {options[key]}[/white]")
+                table.add_row(" ", f"[cyan]{key}[/cyan] [dim]({options[key]})[/dim]")
         
         table.add_row("", "")
         table.add_row("", "[dim]Use ↑/↓ to navigate, Enter to select, Esc to cancel[/dim]")
@@ -341,13 +358,13 @@ def run_command(cmd: list[str], check_return: bool = True, capture: bool = False
         return None
 
 
-def check_tool_for_tracker(tool: str, install_hint: str, tracker: StepTracker) -> bool:
+def check_tool_for_tracker(tool: str, tracker: StepTracker) -> bool:
     """Check if a tool is installed and update tracker."""
     if shutil.which(tool):
         tracker.complete(tool, "available")
         return True
     else:
-        tracker.error(tool, f"not found - {install_hint}")
+        tracker.error(tool, "not found")
         return False
 
 
@@ -366,8 +383,6 @@ def check_tool(tool: str, install_hint: str) -> bool:
     if shutil.which(tool):
         return True
     else:
-        console.print(f"[yellow]⚠️  {tool} not found[/yellow]")
-        console.print(f"   Install with: [cyan]{install_hint}[/cyan]")
         return False
 
 
@@ -416,7 +431,7 @@ def init_git_repo(project_path: Path, quiet: bool = False) -> bool:
         os.chdir(original_cwd)
 
 
-def download_template_from_github(ai_assistant: str, download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: httpx.Client = None, debug: bool = False) -> Tuple[Path, dict]:
+def download_template_from_github(ai_assistant: str, download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: httpx.Client = None, debug: bool = False, github_token: str = None) -> Tuple[Path, dict]:
     repo_owner = "github"
     repo_name = "spec-kit"
     if client is None:
@@ -427,7 +442,12 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
     api_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"
     
     try:
-        response = client.get(api_url, timeout=30, follow_redirects=True)
+        response = client.get(
+            api_url,
+            timeout=30,
+            follow_redirects=True,
+            headers=_github_auth_headers(github_token),
+        )
         status = response.status_code
         if status != 200:
             msg = f"GitHub API returned {status} for {api_url}"
@@ -444,20 +464,21 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
         raise typer.Exit(1)
     
     # Find the template asset for the specified AI assistant
+    assets = release_data.get("assets", [])
     pattern = f"spec-kit-template-{ai_assistant}-{script_type}"
     matching_assets = [
-        asset for asset in release_data.get("assets", [])
+        asset for asset in assets
         if pattern in asset["name"] and asset["name"].endswith(".zip")
     ]
-    
-    if not matching_assets:
-        console.print(f"[red]No matching release asset found[/red] for pattern: [bold]{pattern}[/bold]")
-        asset_names = [a.get('name','?') for a in release_data.get('assets', [])]
+
+    asset = matching_assets[0] if matching_assets else None
+
+    if asset is None:
+        console.print(f"[red]No matching release asset found[/red] for [bold]{ai_assistant}[/bold] (expected pattern: [bold]{pattern}[/bold])")
+        asset_names = [a.get('name', '?') for a in assets]
         console.print(Panel("\n".join(asset_names) or "(no assets)", title="Available Assets", border_style="yellow"))
         raise typer.Exit(1)
-    
-    # Use the first matching asset
-    asset = matching_assets[0]
+
     download_url = asset["browser_download_url"]
     filename = asset["name"]
     file_size = asset["size"]
@@ -466,14 +487,19 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
         console.print(f"[cyan]Found template:[/cyan] {filename}")
         console.print(f"[cyan]Size:[/cyan] {file_size:,} bytes")
         console.print(f"[cyan]Release:[/cyan] {release_data['tag_name']}")
-    
-    # Download the file
+
     zip_path = download_dir / filename
     if verbose:
         console.print(f"[cyan]Downloading template...[/cyan]")
     
     try:
-        with client.stream("GET", download_url, timeout=60, follow_redirects=True) as response:
+        with client.stream(
+            "GET",
+            download_url,
+            timeout=60,
+            follow_redirects=True,
+            headers=_github_auth_headers(github_token),
+        ) as response:
             if response.status_code != 200:
                 body_sample = response.text[:400]
                 raise RuntimeError(f"Download failed with {response.status_code}\nHeaders: {response.headers}\nBody (truncated): {body_sample}")
@@ -517,7 +543,7 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
     return zip_path, metadata
 
 
-def download_and_extract_template(project_path: Path, ai_assistant: str, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: StepTracker | None = None, client: httpx.Client = None, debug: bool = False) -> Path:
+def download_and_extract_template(project_path: Path, ai_assistant: str, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: StepTracker | None = None, client: httpx.Client = None, debug: bool = False, github_token: str = None) -> Path:
     """Download the latest release and extract it to create a new project.
     Returns project_path. Uses tracker if provided (with keys: fetch, download, extract, cleanup)
     """
@@ -534,7 +560,8 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
             verbose=verbose and tracker is None,
             show_progress=(tracker is None),
             client=client,
-            debug=debug
+            debug=debug,
+            github_token=github_token
         )
         if tracker:
             tracker.complete("fetch", f"release {meta['release']} ({meta['size']:,} bytes)")
@@ -718,24 +745,25 @@ def ensure_executable_scripts(project_path: Path, tracker: StepTracker | None = 
             for f in failures:
                 console.print(f"  - {f}")
 
-
 @app.command()
 def init(
     project_name: str = typer.Argument(None, help="Name for your new project directory (optional if using --here)"),
-    ai_assistant: str = typer.Option(None, "--ai", help="AI assistant to use: claude, gemini, copilot, or cursor"),
+    ai_assistant: str = typer.Option(None, "--ai", help="AI assistant to use: claude, gemini, copilot, cursor, qwen, opencode, codex, windsurf, kilocode, or auggie"),
     script_type: str = typer.Option(None, "--script", help="Script type to use: sh or ps"),
     ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for AI agent tools like Claude Code"),
     no_git: bool = typer.Option(False, "--no-git", help="Skip git repository initialization"),
     here: bool = typer.Option(False, "--here", help="Initialize project in the current directory instead of creating a new one"),
+    force: bool = typer.Option(False, "--force", help="Force merge/overwrite when using --here (skip confirmation)"),
     skip_tls: bool = typer.Option(False, "--skip-tls", help="Skip SSL/TLS verification (not recommended)"),
     debug: bool = typer.Option(False, "--debug", help="Show verbose diagnostic output for network and extraction failures"),
+    github_token: str = typer.Option(None, "--github-token", help="GitHub token to use for API requests (or set GH_TOKEN or GITHUB_TOKEN environment variable)"),
 ):
     """
     Initialize a new Specify project from the latest template.
     
     This command will:
     1. Check that required tools are installed (git is optional)
-    2. Let you choose your AI assistant (Claude Code, Gemini CLI, GitHub Copilot, or Cursor)
+    2. Let you choose your AI assistant (Claude Code, Gemini CLI, GitHub Copilot, Cursor, Qwen Code, opencode, Codex CLI, Windsurf, Kilo Code, or Auggie CLI)
     3. Download the appropriate template from GitHub
     4. Extract the template to a new project directory or current directory
     5. Initialize a fresh git repository (if not --no-git and no existing repo)
@@ -747,9 +775,16 @@ def init(
         specify init my-project --ai gemini
         specify init my-project --ai copilot --no-git
         specify init my-project --ai cursor
+        specify init my-project --ai qwen
+        specify init my-project --ai opencode
+        specify init my-project --ai codex
+        specify init my-project --ai windsurf
+        specify init my-project --ai auggie
         specify init --ignore-agent-tools my-project
         specify init --here --ai claude
+        specify init --here --ai codex
         specify init --here
+        specify init --here --force  # Skip confirmation when current directory not empty
     """
     # Show banner first
     show_banner()
@@ -773,31 +808,51 @@ def init(
         if existing_items:
             console.print(f"[yellow]Warning:[/yellow] Current directory is not empty ({len(existing_items)} items)")
             console.print("[yellow]Template files will be merged with existing content and may overwrite existing files[/yellow]")
-            
-            # Ask for confirmation
-            response = typer.confirm("Do you want to continue?")
-            if not response:
-                console.print("[yellow]Operation cancelled[/yellow]")
-                raise typer.Exit(0)
+            if force:
+                console.print("[cyan]--force supplied: skipping confirmation and proceeding with merge[/cyan]")
+            else:
+                # Ask for confirmation
+                response = typer.confirm("Do you want to continue?")
+                if not response:
+                    console.print("[yellow]Operation cancelled[/yellow]")
+                    raise typer.Exit(0)
     else:
         project_path = Path(project_name).resolve()
         # Check if project directory already exists
         if project_path.exists():
-            console.print(f"[red]Error:[/red] Directory '{project_name}' already exists")
+            error_panel = Panel(
+                f"Directory '[cyan]{project_name}[/cyan]' already exists\n"
+                "Please choose a different project name or remove the existing directory.",
+                title="[red]Directory Conflict[/red]",
+                border_style="red",
+                padding=(1, 2)
+            )
+            console.print()
+            console.print(error_panel)
             raise typer.Exit(1)
     
-    console.print(Panel.fit(
-        "[bold cyan]Specify Project Setup[/bold cyan]\n"
-        f"{'Initializing in current directory:' if here else 'Creating new project:'} [green]{project_path.name}[/green]"
-        + (f"\n[dim]Path: {project_path}[/dim]" if here else ""),
-        border_style="cyan"
-    ))
+    # Create formatted setup info with column alignment
+    current_dir = Path.cwd()
+    
+    setup_lines = [
+        "[cyan]Specify Project Setup[/cyan]",
+        "",
+        f"{'Project':<15} [green]{project_path.name}[/green]",
+        f"{'Working Path':<15} [dim]{current_dir}[/dim]",
+    ]
+    
+    # Add target path only if different from working dir
+    if not here:
+        setup_lines.append(f"{'Target Path':<15} [dim]{project_path}[/dim]")
+    
+    console.print(Panel("\n".join(setup_lines), border_style="cyan", padding=(1, 2)))
     
     # Check git only if we might need it (not --no-git)
-    git_available = True
+    # Only set to True if the user wants it and the tool is available
+    should_init_git = False
     if not no_git:
-        git_available = check_tool("git", "https://git-scm.com/downloads")
-        if not git_available:
+        should_init_git = check_tool("git", "https://git-scm.com/downloads")
+        if not should_init_git:
             console.print("[yellow]Git not found - will skip repository initialization[/yellow]")
 
     # AI assistant selection
@@ -817,18 +872,45 @@ def init(
     # Check agent tools unless ignored
     if not ignore_agent_tools:
         agent_tool_missing = False
+        install_url = ""
         if selected_ai == "claude":
-            if not check_tool("claude", "Install from: https://docs.anthropic.com/en/docs/claude-code/setup"):
-                console.print("[red]Error:[/red] Claude CLI is required for Claude Code projects")
+            if not check_tool("claude", "https://docs.anthropic.com/en/docs/claude-code/setup"):
+                install_url = "https://docs.anthropic.com/en/docs/claude-code/setup"
                 agent_tool_missing = True
         elif selected_ai == "gemini":
-            if not check_tool("gemini", "Install from: https://github.com/google-gemini/gemini-cli"):
-                console.print("[red]Error:[/red] Gemini CLI is required for Gemini projects")
+            if not check_tool("gemini", "https://github.com/google-gemini/gemini-cli"):
+                install_url = "https://github.com/google-gemini/gemini-cli"
                 agent_tool_missing = True
+        elif selected_ai == "qwen":
+            if not check_tool("qwen", "https://github.com/QwenLM/qwen-code"):
+                install_url = "https://github.com/QwenLM/qwen-code"
+                agent_tool_missing = True
+        elif selected_ai == "opencode":
+            if not check_tool("opencode", "https://opencode.ai"):
+                install_url = "https://opencode.ai"
+                agent_tool_missing = True
+        elif selected_ai == "codex":
+            if not check_tool("codex", "https://github.com/openai/codex"):
+                install_url = "https://github.com/openai/codex"
+                agent_tool_missing = True
+        elif selected_ai == "auggie":
+            if not check_tool("auggie", "https://docs.augmentcode.com/cli/setup-auggie/install-auggie-cli"):
+                install_url = "https://docs.augmentcode.com/cli/setup-auggie/install-auggie-cli"
+                agent_tool_missing = True
+        # GitHub Copilot and Cursor checks are not needed as they're typically available in supported IDEs
 
         if agent_tool_missing:
-            console.print("\n[red]Required AI tool is missing![/red]")
-            console.print("[yellow]Tip:[/yellow] Use --ignore-agent-tools to skip this check")
+            error_panel = Panel(
+                f"[cyan]{selected_ai}[/cyan] not found\n"
+                f"Install with: [cyan]{install_url}[/cyan]\n"
+                f"{AI_CHOICES[selected_ai]} is required to continue with this project type.\n\n"
+                "Tip: Use [cyan]--ignore-agent-tools[/cyan] to skip this check",
+                title="[red]Agent Detection Error[/red]",
+                border_style="red",
+                padding=(1, 2)
+            )
+            console.print()
+            console.print(error_panel)
             raise typer.Exit(1)
     
     # Determine script type (explicit, interactive, or OS default)
@@ -867,7 +949,7 @@ def init(
         ("extract", "Extract template"),
         ("zip-list", "Archive contents"),
         ("extracted-summary", "Extraction summary"),
-    ("chmod", "Ensure scripts executable"),
+        ("chmod", "Ensure scripts executable"),
         ("cleanup", "Cleanup"),
         ("git", "Initialize git repository"),
         ("final", "Finalize")
@@ -883,7 +965,7 @@ def init(
             local_ssl_context = ssl_context if verify else False
             local_client = httpx.Client(verify=local_ssl_context)
 
-            download_and_extract_template(project_path, selected_ai, selected_script, here, verbose=False, tracker=tracker, client=local_client, debug=debug)
+            download_and_extract_template(project_path, selected_ai, selected_script, here, verbose=False, tracker=tracker, client=local_client, debug=debug, github_token=github_token)
 
             # Ensure scripts are executable (POSIX)
             ensure_executable_scripts(project_path, tracker=tracker)
@@ -893,7 +975,7 @@ def init(
                 tracker.start("git")
                 if is_git_repo(project_path):
                     tracker.complete("git", "existing repo detected")
-                elif git_available:
+                elif should_init_git:
                     if init_git_repo(project_path, quiet=True):
                         tracker.complete("git", "initialized")
                     else:
@@ -927,40 +1009,77 @@ def init(
     console.print(tracker.render())
     console.print("\n[bold green]Project ready.[/bold green]")
     
+    # Agent folder security notice
+    agent_folder_map = {
+        "claude": ".claude/",
+        "gemini": ".gemini/",
+        "cursor": ".cursor/",
+        "qwen": ".qwen/",
+        "opencode": ".opencode/",
+        "codex": ".codex/",
+        "windsurf": ".windsurf/",
+        "kilocode": ".kilocode/",
+        "auggie": ".augment/",
+        "copilot": ".github/",
+        "roo": ".roo/"
+    }
+    
+    if selected_ai in agent_folder_map:
+        agent_folder = agent_folder_map[selected_ai]
+        security_notice = Panel(
+            f"Some agents may store credentials, auth tokens, or other identifying and private artifacts in the agent folder within your project.\n"
+            f"Consider adding [cyan]{agent_folder}[/cyan] (or parts of it) to [cyan].gitignore[/cyan] to prevent accidental credential leakage.",
+            title="[yellow]Agent Folder Security[/yellow]",
+            border_style="yellow",
+            padding=(1, 2)
+        )
+        console.print()
+        console.print(security_notice)
+    
     # Boxed "Next steps" section
     steps_lines = []
     if not here:
-        steps_lines.append(f"1. [bold green]cd {project_name}[/bold green]")
+        steps_lines.append(f"1. Go to the project folder: [cyan]cd {project_name}[/cyan]")
         step_num = 2
     else:
         steps_lines.append("1. You're already in the project directory!")
         step_num = 2
 
-    if selected_ai == "claude":
-        steps_lines.append(f"{step_num}. Open in Visual Studio Code and start using / commands with Claude Code")
-        steps_lines.append("   - Type / in any file to see available commands")
-        steps_lines.append("   - Use /specify to create specifications")
-        steps_lines.append("   - Use /plan to create implementation plans")
-        steps_lines.append("   - Use /tasks to generate tasks")
-    elif selected_ai == "gemini":
-        steps_lines.append(f"{step_num}. Use / commands with Gemini CLI")
-        steps_lines.append("   - Run gemini /specify to create specifications")
-        steps_lines.append("   - Run gemini /plan to create implementation plans")
-        steps_lines.append("   - Run gemini /tasks to generate tasks")
-        steps_lines.append("   - See GEMINI.md for all available commands")
-    elif selected_ai == "copilot":
-        steps_lines.append(f"{step_num}. Open in Visual Studio Code and use [bold cyan]/specify[/], [bold cyan]/plan[/], [bold cyan]/tasks[/] commands with GitHub Copilot")
+    # Add Codex-specific setup step if needed
+    if selected_ai == "codex":
+        codex_path = project_path / ".codex"
+        quoted_path = shlex.quote(str(codex_path))
+        if os.name == "nt":  # Windows
+            cmd = f"setx CODEX_HOME {quoted_path}"
+        else:  # Unix-like systems
+            cmd = f"export CODEX_HOME={quoted_path}"
+        
+        steps_lines.append(f"{step_num}. Set [cyan]CODEX_HOME[/cyan] environment variable before running Codex: [cyan]{cmd}[/cyan]")
+        step_num += 1
 
-    # Removed script variant step (scripts are transparent to users)
-    step_num += 1
-    steps_lines.append(f"{step_num}. Update [bold magenta]CONSTITUTION.md[/bold magenta] with your project's non-negotiable principles")
+    steps_lines.append(f"{step_num}. Start using slash commands with your AI agent:")
+    steps_lines.append("   2.1 [cyan]/constitution[/] - Establish project principles")
+    steps_lines.append("   2.2 [cyan]/specify[/] - Create specifications")
+    steps_lines.append("   2.3 [cyan]/clarify[/] - Clarify and de-risk specification (run before [cyan]/plan[/cyan])")
+    steps_lines.append("   2.4 [cyan]/plan[/] - Create implementation plans")
+    steps_lines.append("   2.5 [cyan]/tasks[/] - Generate actionable tasks")
+    steps_lines.append("   2.6 [cyan]/analyze[/] - Validate alignment & surface inconsistencies (read-only)")
+    steps_lines.append("   2.7 [cyan]/implement[/] - Execute implementation")
 
-    steps_panel = Panel("\n".join(steps_lines), title="Next steps", border_style="cyan", padding=(1,2))
-    console.print()  # blank line
+    steps_panel = Panel("\n".join(steps_lines), title="Next Steps", border_style="cyan", padding=(1,2))
+    console.print()
     console.print(steps_panel)
-    
-    # Removed farewell line per user request
 
+    if selected_ai == "codex":
+        warning_text = """[bold yellow]Important Note:[/bold yellow]
+
+Custom prompts do not yet support arguments in Codex. You may need to manually specify additional project instructions directly in prompt files located in [cyan].codex/prompts/[/cyan].
+
+For more information, see: [cyan]https://github.com/openai/codex/issues/2890[/cyan]"""
+        
+        warning_panel = Panel(warning_text, title="Slash Commands in Codex", border_style="yellow", padding=(1,2))
+        console.print()
+        console.print(warning_panel)
 
 @app.command()
 def check():
@@ -968,36 +1087,41 @@ def check():
     show_banner()
     console.print("[bold]Checking for installed tools...[/bold]\n")
 
-    # Create tracker for checking tools
     tracker = StepTracker("Check Available Tools")
     
-    # Add all tools we want to check
     tracker.add("git", "Git version control")
     tracker.add("claude", "Claude Code CLI")
     tracker.add("gemini", "Gemini CLI")
-    tracker.add("code", "VS Code (for GitHub Copilot)")
-    tracker.add("cursor-agent", "Cursor IDE agent (optional)")
+    tracker.add("qwen", "Qwen Code CLI")
+    tracker.add("code", "Visual Studio Code")
+    tracker.add("code-insiders", "Visual Studio Code Insiders")
+    tracker.add("cursor-agent", "Cursor IDE agent")
+    tracker.add("windsurf", "Windsurf IDE")
+    tracker.add("kilocode", "Kilo Code IDE")
+    tracker.add("opencode", "opencode")
+    tracker.add("codex", "Codex CLI")
+    tracker.add("auggie", "Auggie CLI")
     
-    # Check each tool
-    git_ok = check_tool_for_tracker("git", "https://git-scm.com/downloads", tracker)
-    claude_ok = check_tool_for_tracker("claude", "https://docs.anthropic.com/en/docs/claude-code/setup", tracker)  
-    gemini_ok = check_tool_for_tracker("gemini", "https://github.com/google-gemini/gemini-cli", tracker)
-    # Check for VS Code (code or code-insiders)
-    code_ok = check_tool_for_tracker("code", "https://code.visualstudio.com/", tracker)
-    if not code_ok:
-        code_ok = check_tool_for_tracker("code-insiders", "https://code.visualstudio.com/insiders/", tracker)
-    cursor_ok = check_tool_for_tracker("cursor-agent", "https://cursor.sh/", tracker)
-    
-    # Render the final tree
+    git_ok = check_tool_for_tracker("git", tracker)
+    claude_ok = check_tool_for_tracker("claude", tracker)  
+    gemini_ok = check_tool_for_tracker("gemini", tracker)
+    qwen_ok = check_tool_for_tracker("qwen", tracker)
+    code_ok = check_tool_for_tracker("code", tracker)
+    code_insiders_ok = check_tool_for_tracker("code-insiders", tracker)
+    cursor_ok = check_tool_for_tracker("cursor-agent", tracker)
+    windsurf_ok = check_tool_for_tracker("windsurf", tracker)
+    kilocode_ok = check_tool_for_tracker("kilocode", tracker)
+    opencode_ok = check_tool_for_tracker("opencode", tracker)
+    codex_ok = check_tool_for_tracker("codex", tracker)
+    auggie_ok = check_tool_for_tracker("auggie", tracker)
+
     console.print(tracker.render())
-    
-    # Summary
+
     console.print("\n[bold green]Specify CLI is ready to use![/bold green]")
-    
-    # Recommendations
+
     if not git_ok:
         console.print("[dim]Tip: Install git for repository management[/dim]")
-    if not (claude_ok or gemini_ok):
+    if not (claude_ok or gemini_ok or cursor_ok or qwen_ok or windsurf_ok or kilocode_ok or opencode_ok or codex_ok or auggie_ok):
         console.print("[dim]Tip: Install an AI assistant for the best experience[/dim]")
 
 

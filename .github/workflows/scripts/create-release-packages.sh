@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage: .github/workflows/scripts/create-release-packages.sh <version>
 #   Version argument should include leading 'v'.
 #   Optionally set AGENTS and/or SCRIPTS env vars to limit what gets built.
-#     AGENTS  : space or comma separated subset of: claude gemini copilot (default: all)
+#     AGENTS  : space or comma separated subset of: claude gemini copilot cursor qwen opencode windsurf codex (default: all)
 #     SCRIPTS : space or comma separated subset of: sh ps (default: both)
 #   Examples:
 #     AGENTS=claude SCRIPTS=sh $0 v0.2.0
@@ -25,7 +25,10 @@ fi
 
 echo "Building release packages for $NEW_VERSION"
 
-rm -rf sdd-package-base* sdd-*-package-* spec-kit-template-*-${NEW_VERSION}.zip || true
+# Create and use .genreleases directory for all build artifacts
+GENRELEASES_DIR=".genreleases"
+mkdir -p "$GENRELEASES_DIR"
+rm -rf "$GENRELEASES_DIR"/* || true
 
 rewrite_paths() {
   sed -E \
@@ -82,7 +85,7 @@ generate_commands() {
 
 build_variant() {
   local agent=$1 script=$2
-  local base_dir="sdd-${agent}-package-${script}"
+  local base_dir="$GENRELEASES_DIR/sdd-${agent}-package-${script}"
   echo "Building $agent ($script) package..."
   mkdir -p "$base_dir"
   
@@ -114,14 +117,25 @@ build_variant() {
   local plan_tpl="$base_dir/.specify/templates/plan-template.md"
   if [[ -f "$plan_tpl" ]]; then
     plan_norm=$(tr -d '\r' < "$plan_tpl")
-    variant_line=$(printf '%s\n' "$plan_norm" | grep -E "<!--[[:space:]]*VARIANT:$script" | head -1 | sed -E "s/.*VARIANT:$script[[:space:]]+//; s/-->.*//; s/^[[:space:]]+//; s/[[:space:]]+$//")
-    if [[ -n $variant_line ]]; then
-      tmp_file=$(mktemp)
-      sed "s|VARIANT-INJECT|${variant_line}|" "$plan_tpl" | tr -d '\r' | sed "s|__AGENT__|${agent}|g" | sed '/<!--[[:space:]]*VARIANT:sh/d' | sed '/<!--[[:space:]]*VARIANT:ps/d' > "$tmp_file" && mv "$tmp_file" "$plan_tpl"
+    # Extract script command from YAML frontmatter
+    script_command=$(printf '%s\n' "$plan_norm" | awk -v sv="$script" '/^[[:space:]]*'"$script"':[[:space:]]*/ {sub(/^[[:space:]]*'"$script"':[[:space:]]*/, ""); print; exit}')
+    if [[ -n $script_command ]]; then
+      # Always prefix with .specify/ for plan usage
+      script_command=".specify/$script_command"
+      # Replace {SCRIPT} placeholder with the script command and __AGENT__ with agent name
+      substituted=$(sed "s|{SCRIPT}|${script_command}|g" "$plan_tpl" | tr -d '\r' | sed "s|__AGENT__|${agent}|g")
+      # Strip YAML frontmatter from plan template output (keep body only)
+      stripped=$(printf '%s\n' "$substituted" | awk 'BEGIN{fm=0;dash=0} /^---$/ {dash++; if(dash==1){fm=1; next} else if(dash==2){fm=0; next}} {if(!fm) print}')
+      printf '%s\n' "$stripped" > "$plan_tpl"
     else
-      echo "Warning: no plan-template variant for $script (pattern not matched)" >&2
+      echo "Warning: no plan-template script command found for $script in YAML frontmatter" >&2
     fi
   fi
+  # NOTE: We substitute {ARGS} internally. Outward tokens differ intentionally:
+  #   * Markdown/prompt (claude, copilot, cursor, opencode): $ARGUMENTS
+  #   * TOML (gemini, qwen): {{args}}
+  # This keeps formats readable without extra abstraction.
+
   case $agent in
     claude)
       mkdir -p "$base_dir/.claude/commands"
@@ -136,14 +150,37 @@ build_variant() {
     cursor)
       mkdir -p "$base_dir/.cursor/commands"
       generate_commands cursor md "\$ARGUMENTS" "$base_dir/.cursor/commands" "$script" ;;
+    qwen)
+      mkdir -p "$base_dir/.qwen/commands"
+      generate_commands qwen toml "{{args}}" "$base_dir/.qwen/commands" "$script"
+      [[ -f agent_templates/qwen/QWEN.md ]] && cp agent_templates/qwen/QWEN.md "$base_dir/QWEN.md" ;;
+    opencode)
+      mkdir -p "$base_dir/.opencode/command"
+      generate_commands opencode md "\$ARGUMENTS" "$base_dir/.opencode/command" "$script" ;;
+    windsurf)
+      mkdir -p "$base_dir/.windsurf/workflows"
+      generate_commands windsurf md "\$ARGUMENTS" "$base_dir/.windsurf/workflows" "$script" ;;
+    codex)
+      mkdir -p "$base_dir/.codex/prompts"
+      generate_commands codex md "\$ARGUMENTS" "$base_dir/.codex/prompts" "$script" ;;
+    kilocode)
+      mkdir -p "$base_dir/.kilocode/workflows"
+      generate_commands kilocode md "\$ARGUMENTS" "$base_dir/.kilocode/workflows" "$script" ;;
+    auggie)
+      mkdir -p "$base_dir/.augment/commands"
+      generate_commands auggie md "\$ARGUMENTS" "$base_dir/.augment/commands" "$script" ;;
+    roo)
+      mkdir -p "$base_dir/.roo/commands"
+      generate_commands roo md "\$ARGUMENTS" "$base_dir/.roo/commands" "$script" ;;
   esac
   ( cd "$base_dir" && zip -r "../spec-kit-template-${agent}-${script}-${NEW_VERSION}.zip" . )
-  echo "Created spec-kit-template-${agent}-${script}-${NEW_VERSION}.zip"
+  echo "Created $GENRELEASES_DIR/spec-kit-template-${agent}-${script}-${NEW_VERSION}.zip"
 }
 
 # Determine agent list
-ALL_AGENTS=(claude gemini copilot cursor)
+ALL_AGENTS=(claude gemini copilot cursor qwen opencode windsurf codex kilocode auggie roo)
 ALL_SCRIPTS=(sh ps)
+
 
 norm_list() {
   # convert comma+space separated -> space separated unique while preserving order of first occurrence
@@ -151,11 +188,11 @@ norm_list() {
 }
 
 validate_subset() {
-  local type=$1; shift; local -n allowed=$1; shift; local items=($@)
+  local type=$1; shift; local -n allowed=$1; shift; local items=("$@")
   local ok=1
   for it in "${items[@]}"; do
     local found=0
-    for a in "${allowed[@]}"; do [[ $it == $a ]] && { found=1; break; }; done
+    for a in "${allowed[@]}"; do [[ $it == "$a" ]] && { found=1; break; }; done
     if [[ $found -eq 0 ]]; then
       echo "Error: unknown $type '$it' (allowed: ${allowed[*]})" >&2
       ok=0
@@ -165,17 +202,17 @@ validate_subset() {
 }
 
 if [[ -n ${AGENTS:-} ]]; then
-  AGENT_LIST=($(printf '%s' "$AGENTS" | norm_list))
+  mapfile -t AGENT_LIST < <(printf '%s' "$AGENTS" | norm_list)
   validate_subset agent ALL_AGENTS "${AGENT_LIST[@]}" || exit 1
 else
-  AGENT_LIST=(${ALL_AGENTS[@]})
+  AGENT_LIST=("${ALL_AGENTS[@]}")
 fi
 
 if [[ -n ${SCRIPTS:-} ]]; then
-  SCRIPT_LIST=($(printf '%s' "$SCRIPTS" | norm_list))
+  mapfile -t SCRIPT_LIST < <(printf '%s' "$SCRIPTS" | norm_list)
   validate_subset script ALL_SCRIPTS "${SCRIPT_LIST[@]}" || exit 1
 else
-  SCRIPT_LIST=(${ALL_SCRIPTS[@]})
+  SCRIPT_LIST=("${ALL_SCRIPTS[@]}")
 fi
 
 echo "Agents: ${AGENT_LIST[*]}"
@@ -187,5 +224,5 @@ for agent in "${AGENT_LIST[@]}"; do
   done
 done
 
-echo "Archives:"
-ls -1 spec-kit-template-*-${NEW_VERSION}.zip
+echo "Archives in $GENRELEASES_DIR:"
+ls -1 "$GENRELEASES_DIR"/spec-kit-template-*-"${NEW_VERSION}".zip
