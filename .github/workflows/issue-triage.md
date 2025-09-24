@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
   actions: read
-engine: claude
+engine: codex
 network: defaults
 tools:
   github:
