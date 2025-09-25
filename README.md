@@ -565,9 +565,10 @@ inside the benchmark container.
    uv tool install terminal-bench
    ```
 2. Export the credentials required by the provider (for Grok set `XAI_API_KEY`).
-3. Launch a task with the Spec Kit agent:
+3. Launch a task with the Spec Kit agent (use `uv run` so the local checkout is available on
+   `PYTHONPATH` automatically):
    ```bash
-   tb run \
+   uv run tb run \
      --agent-import-path specify_cli.terminal_bench:SpecKitOpenCodeAgent \
      --dataset terminal-bench-core==0.1.1 \
      --task-id hello-world

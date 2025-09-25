@@ -33,6 +33,11 @@ uv run tb run \
   --task-id hello-world
 ```
 
+> [!TIP]
+> The repository's `pyproject.toml` declares the project as a local source for `uv`, so
+> `uv run` automatically exposes `specify_cli` on `sys.path`. You don't need manual shims or
+> editable installs when launching Terminal-Bench from a checkout.
+
 The harness mounts the Spec Kit repository into the benchmark container, installs the
 Specify CLI, provisions the `.specify` and `.opencode` directories, then runs the standard
 prompt sequence with the benchmark instruction as input. Each stage feeds the instruction back

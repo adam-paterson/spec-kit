@@ -21,3 +21,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/specify_cli"]
+
+[tool.uv.sources]
+"specify-cli" = { path = "src/specify_cli" }
