@@ -1,0 +1,21 @@
+#!/bin/bash
+set -euo pipefail
+
+apt-get update
+apt-get install -y curl git
+
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash
+
+source "$HOME/.nvm/nvm.sh"
+
+nvm install 22
+npm -v
+
+npm i -g opencode-ai@{{ version }}
+
+if ! command -v uv >/dev/null 2>&1; then
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
+
+export PATH="$HOME/.local/bin:$PATH"
+uv tool install specify-cli --from git+https://github.com/github/spec-kit.git
