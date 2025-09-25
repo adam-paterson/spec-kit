@@ -26,6 +26,7 @@
 - [📖 Learn more](#-learn-more)
 - [📋 Detailed process](#-detailed-process)
 - [🔍 Troubleshooting](#-troubleshooting)
+- [📊 Benchmarking](#-benchmarking)
 - [👥 Maintainers](#-maintainers)
 - [💬 Support](#-support)
 - [🙏 Acknowledgements](#-acknowledgements)
@@ -549,6 +550,36 @@ git config --global credential.helper manager
 echo "Cleaning up..."
 rm gcm-linux_amd64.2.6.1.deb
 ```
+
+## 📊 Benchmarking
+
+Want to evaluate the Spec Kit workflow on realistic engineering scenarios? Combine it with
+[Terminal-Bench](https://www.tbench.ai/docs) using the bundled
+`SpecKitOpenCodeAgent`. The agent installs the Specify CLI via `uv`, provisions the Spec Kit
+prompts, and runs the `constitution → specify → plan → tasks → implement` sequence with
+[`opencode/grok-code`](https://opencode.ai/) by invoking `opencode -p <prompt>` for each step
+inside the benchmark container.
+
+1. Install the benchmark tooling:
+   ```bash
+   uv tool install terminal-bench
+   ```
+2. Export the credentials required by the provider (for Grok set `XAI_API_KEY`).
+3. Launch a task with the Spec Kit agent:
+   ```bash
+   tb run \
+     --agent-import-path specify_cli.terminal_bench:SpecKitOpenCodeAgent \
+     --dataset terminal-bench-core==0.1.1 \
+     --task-id hello-world
+   ```
+
+The benchmark instruction is threaded through the Spec Kit prompts automatically, generating
+the specification, plan, tasks, and implementation artifacts just like a human-driven
+workflow. Customise any prompt by passing `--agent-kwarg`, for example
+`--agent-kwarg plan_template="Focus on runtime performance for {instruction}"`.
+
+Read the [benchmarking guide](docs/benchmarking.md) for more examples, extra prompt
+configuration, and tips on running larger datasets.
 
 ## 👥 Maintainers
 
